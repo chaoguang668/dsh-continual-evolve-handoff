@@ -136,6 +136,13 @@ const EVOLVE_READ_PARAMETERS = {
 			enum: ["memory", "skill"],
 			description: "管理对象：memory 持久记忆 / skill 可复用技能（同名时项目遮蔽全局）。",
 		},
+		action: {
+			type: "string",
+			enum: ["handoff"],
+			description:
+				"memory 专用视图：handoff = 交接视图（我是谁 / 干到哪 / 下一步 / 卡在哪四问）。" +
+				"新会话开场先调它，读完四问就该能开工；细节再用 id 或 query 取。",
+		},
 		id: { type: "string", description: "按 id 直取一条的完整内容。" },
 		query: { type: "string", description: "关键词检索（不传 id 时生效；不传 query 则列目录）。" },
 		limit: { type: "number", description: "检索/列出的最大条数，默认 3，上限 10。" },
@@ -160,6 +167,8 @@ export interface EvolveWriteArgs {
 /** Arguments the unified read executor accepts (workspace already resolved). */
 export interface EvolveReadArgs {
 	kind: string;
+	/** Optional view selector; `handoff` renders the four-question projection. */
+	action?: string | undefined;
 	id?: string | undefined;
 	query?: string | undefined;
 	limit?: unknown;
@@ -246,7 +255,7 @@ export function registerEvolveTools(tools: ToolsService, store: MemoryStore): ()
 		tools.register(
 			textTool(
 				"evolve_read",
-				"读取一条管理对象：按 id 取完整正文，或按关键词检索（kind=memory 看本工作区与全局分区，同名时本工作区遮蔽全局；kind=skill 看本项目与全局，同名时项目遮蔽全局）。",
+				"读取一条管理对象：按 id 取完整正文，按关键词检索，或取交接视图（action=handoff：我是谁 / 干到哪 / 下一步 / 卡在哪四问；新会话开场先调它）。kind=memory 看本工作区与全局分区，同名时本工作区遮蔽全局；kind=skill 看本项目与全局，同名时项目遮蔽全局。",
 				EVOLVE_READ_PARAMETERS,
 				async (args, exec) => {
 					if (!isEvolveKind(args.kind)) {
@@ -258,6 +267,7 @@ export function registerEvolveTools(tools: ToolsService, store: MemoryStore): ()
 					}
 					return executeEvolveRead(store, cwd, {
 						kind: args.kind,
+						action: stringField(args.action),
 						id: stringField(args.id),
 						query: stringField(args.query),
 						limit: args.limit,

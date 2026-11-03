@@ -4,6 +4,7 @@
  * Reply wording preserves the long-standing tool texts.
  */
 import { clampLimit, stringField } from "./evolve-fields.js";
+import { formatHandoff } from "./evolve-handoff.js";
 import type { MemoryRecord, MemoryStore } from "../store.js";
 
 /** Write fields the memory executor accepts (narrowed from the dispatcher). */
@@ -20,6 +21,8 @@ export interface MemoryWriteFields {
 
 /** Read fields the memory executor accepts (narrowed from the dispatcher). */
 export interface MemoryReadFields {
+	/** Optional view selector; `handoff` renders the four-question projection. */
+	action?: string | undefined;
 	id?: string | undefined;
 	query?: string | undefined;
 	limit?: unknown;
@@ -109,6 +112,13 @@ export function writeMemoryRecord(store: MemoryStore, workspaceId: string, sessi
  */
 export function readMemoryRecords(store: MemoryStore, workspaceId: string, args: MemoryReadFields): string {
 	const limit = clampLimit(args.limit);
+	// The handoff view is a projection, not a read of one record: it answers the
+	// four questions a fresh session needs, and states ③/④ as empty because L2
+	// session state never enters the store. Checked before `id` so an explicit
+	// view request cannot be shadowed by a stray id.
+	if (args.action === "handoff") {
+		return formatHandoff(store.list(workspaceId), workspaceId, { limit: limit * 2 });
+	}
 	if (typeof args.id === "string" && args.id.length > 0) {
 		const record = store.get(workspaceId, args.id);
 		if (record === undefined) {
