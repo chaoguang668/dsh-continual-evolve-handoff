@@ -116,8 +116,13 @@ export function readMemoryRecords(store: MemoryStore, workspaceId: string, args:
 	// four questions a fresh session needs, and states ③/④ as empty because L2
 	// session state never enters the store. Checked before `id` so an explicit
 	// view request cannot be shadowed by a stray id.
+	//
+	// `limit` is not forwarded: it counts search/list hits, whereas the view has
+	// its own per-question cap sized to the byte budget. Forwarding it (as a
+	// doubled value, no less) overrode that cap and clipped 6 of 14 real rows
+	// while the budget still had room.
 	if (args.action === "handoff") {
-		return formatHandoff(store.list(workspaceId), workspaceId, { limit: limit * 2 });
+		return formatHandoff(store.list(workspaceId), workspaceId);
 	}
 	if (typeof args.id === "string" && args.id.length > 0) {
 		const record = store.get(workspaceId, args.id);

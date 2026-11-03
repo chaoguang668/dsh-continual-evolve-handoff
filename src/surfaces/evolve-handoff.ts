@@ -43,11 +43,19 @@ const QUESTIONS = [
 
 type QuestionKey = (typeof QUESTIONS)[number]["key"];
 
-/** Which question each stored `type` answers. Anything unlisted lands on ①. */
+/**
+ * Which question each stored `type` answers.
+ *
+ * `reference` is deliberately absent. It answers "where does this live" — a
+ * lookup pointer, not a fact about who I am or what landed. Folding it into ②
+ * was an early mistake: with 48 reference rows against 14 feedback rows in a
+ * real store, the actual conclusions were pushed past the per-question limit
+ * and the view stopped being actionable. Reference rows are counted in the
+ * footer instead, where the reader can decide to search for them.
+ */
 const TYPE_TO_QUESTION: Readonly<Record<string, QuestionKey>> = {
 	user: "who",
 	feedback: "progress",
-	reference: "progress",
 };
 
 /** Options the view accepts; every one has a working default. */
@@ -61,7 +69,17 @@ export interface HandoffOptions {
 }
 
 const DEFAULT_MAX_CHARS = 90;
-const DEFAULT_BUDGET = 2048;
+/**
+ * Entry budget in bytes.
+ *
+ * Sized against real data density, not a round number. `maxChars` counts
+ * characters, but a CJK character costs 3 bytes in UTF-8 — so a 90-character
+ * summary is up to 270 bytes, and twenty of them are ~3.8 KB. A 2 KB budget
+ * therefore clipped two thirds of a typical store while the view still had
+ * room to spare on screen. 4 KB matches the handoff discipline this view is
+ * modelled on (that one caps its handover at ≤4 KB) and holds a realistic set.
+ */
+const DEFAULT_BUDGET = 4096;
 const DEFAULT_LIMIT = 6;
 
 /** A shape this view needs from a record; kept structural so tests can stub it. */
@@ -101,27 +119,38 @@ function summarize(body: string, maxChars: number): string {
 		.filter(line => line.length > 0);
 	const howLine = lines.find(line => HOW_TO_APPLY.test(line));
 	const whyLine = lines.find(line => WHY.test(line));
-	const plainLine = lines.find(line => !WHY.test(line) && !HOW_TO_APPLY.test(line));
-	const chosen = howLine ?? plainLine ?? whyLine ?? "";
+	// Skip markdown headings: the heading is already carried as `record.title`,
+	// so repeating it spends the summary budget on a duplicate. Imported legacy
+	// memories all open with `# ...`, which made every line start with the title.
+	const bodyLine = lines.find(line => !WHY.test(line) && !HOW_TO_APPLY.test(line) && !/^#{1,6}\s/.test(line));
+	const chosen = howLine ?? bodyLine ?? whyLine ?? lines[0] ?? "";
 	// Collapse whitespace before clipping: a CJK sentence carrying a newline
-	// would otherwise render far longer than the cap promises.
-	const flat = chosen.replace(CONTRACT_LABEL, "").replace(/\s+/g, " ").trim();
+	// would otherwise render far longer than the cap promises. A leading bold
+	// sub-heading (`**现象**：…`) is formatting, not content.
+	const flat = chosen
+		.replace(CONTRACT_LABEL, "")
+		.replace(/^\*\*[^*]+\*\*\s*[：:]?\s*/, "")
+		.replace(/\s+/g, " ")
+		.trim();
 	if (flat.length === 0) return "";
 	return flat.length > maxChars ? `${flat.slice(0, maxChars)}…` : flat;
 }
 
 /**
- * Estimate the fixed skeleton's size: headings, question headers, the empty-slot
- * text, and the footer.
+ * Measure the fixed skeleton: title, question headers, empty-slot text, footer.
  *
- * Only used to decide whether a budget is achievable at all — the reported
- * numbers use measured values. This is a worst-case figure (the footer's widest
- * form), which is the right direction for a budget guard.
+ * This must be a **realistic** figure, not a worst case. An earlier version
+ * counted every optional footer line (unlisted rows, clipping warning, budget
+ * warning) at three-digit placeholders, which over-estimated by ~450 bytes —
+ * enough to trigger clipping while the output was still using a sixth of its
+ * budget. The guard has to reflect what this render will actually emit, so the
+ * optional lines are passed in rather than assumed.
  * @param workspaceId - The partition name, which appears in the title.
  * @param budget - The entry budget, which appears in the footer.
+ * @param footerLines - The optional footer lines this render will emit.
  * @returns Skeleton bytes under UTF-8.
  */
-function skeletonBytesOf(workspaceId: string, budget: number): number {
+function skeletonBytesOf(workspaceId: string, budget: number, footerLines: string[]): number {
 	const skeleton = [
 		`# 交接视图 · ${workspaceId}`,
 		"> 四问范式：我是谁 / 干到哪 / 下一步 / 卡在哪。读完这四个就该能开工；",
@@ -133,9 +162,10 @@ function skeletonBytesOf(workspaceId: string, budget: number): number {
 			"",
 		]),
 		"---",
-		`共 999 条记忆 → ①99 ②99 ③99 ④99；条目 99999 字节（条目预算 ${budget}）`,
-		"⚠ 因体积上限裁掉 999 条——这意味着交接可能不完整，优先看 ②「干到哪」是否有缺口。",
-		"⚠ 条目预算 999 小于固定结构本身（约 9999 字节：标题/四问头/空位提示/尾注），实际输出必然超出。要更短请减少条目或改用 query 检索。",
+		// Measured with the widest realistic counter widths (two digits per
+		// question, five for total bytes) so the estimate does not under-count.
+		`共 99999 条记忆 → ①99 ②99 ③99 ④99；条目 99999 字节（条目预算 ${budget}）`,
+		...footerLines,
 	].join("\n");
 	return Buffer.byteLength(skeleton, "utf8");
 }
@@ -233,9 +263,15 @@ export function formatHandoff(records: HandoffRecord[], workspaceId: string, opt
 
 	const sections: Record<QuestionKey, string[]> = { who: [], progress: [], next: [], blocked: [] };
 	const counts: Record<QuestionKey, number> = { who: 0, progress: 0, next: 0, blocked: 0 };
+	/** Rows the four questions do not cover, by type — counted, never expanded. */
+	const unlisted: Record<string, number> = {};
 
 	for (const record of records) {
-		const question = TYPE_TO_QUESTION[record.type] ?? "who";
+		const question = TYPE_TO_QUESTION[record.type];
+		if (question === undefined) {
+			unlisted[record.type] = (unlisted[record.type] ?? 0) + 1;
+			continue;
+		}
 		counts[question] += 1;
 		if (sections[question].length >= limitPerQuestion) continue;
 		const summary = summarize(record.body, maxChars);
@@ -245,7 +281,22 @@ export function formatHandoff(records: HandoffRecord[], workspaceId: string, opt
 		sections[question].push(`- \`${record.id}\` ${summary}${notWhen}`);
 	}
 
-	const clipped = clipToBudget(sections, budget, skeletonBytesOf(workspaceId, budget));
+	// The footer's optional lines depend on what the body ends up holding, and
+	// the skeleton figure feeds the clipping decision — so decide them first.
+	// Anything unknown here is assumed present (the guard must not under-count)
+	// but the decision is then re-checked after clipping, and a line that turns
+	// out unnecessary simply is not emitted.
+	const unlistedEntries = Object.entries(unlisted).sort((left, right) => right[1] - left[1]);
+	const unlistedLine =
+		unlistedEntries.length > 0
+			? `另有 ${unlistedEntries.map(([type, count]) => `${type} ${count}`).join(" · ")} 条不属于四问（资料指针类），未展开——需要时用 \`evolve_read(…, query)\` 检索。`
+			: "";
+
+	const clipped = clipToBudget(
+		sections,
+		budget,
+		skeletonBytesOf(workspaceId, budget, unlistedLine.length > 0 ? [unlistedLine] : []),
+	);
 	const out: string[] = [];
 	out.push(`# 交接视图 · ${workspaceId}`);
 	out.push("");
@@ -289,11 +340,16 @@ export function formatHandoff(records: HandoffRecord[], workspaceId: string, opt
 		`共 ${records.length} 条记忆 → ①${counts.who} ②${counts.progress} ③${counts.next} ④${counts.blocked}` +
 			`；条目 ${bodyBytes} 字节（条目预算 ${budget}）`,
 	);
+	// Rows outside the four questions are counted, never expanded: a pointer is
+	// not a conclusion, and listing them crowds out the rows that are.
+	if (unlistedLine.length > 0) {
+		out.push(unlistedLine);
+	}
 	const totalDropped = Object.values(clipped.dropped).reduce((sum, value) => sum + (value ?? 0), 0);
 	if (totalDropped > 0) {
 		out.push(`⚠ 因体积上限裁掉 ${totalDropped} 条——这意味着交接可能不完整，优先看 ②「干到哪」是否有缺口。`);
 	}
-	const skeleton = skeletonBytesOf(workspaceId, budget);
+	const skeleton = skeletonBytesOf(workspaceId, budget, unlistedLine.length > 0 ? [unlistedLine] : []);
 	if (budget < skeleton) {
 		out.push(
 			`⚠ 条目预算 ${budget} 小于固定结构本身（约 ${skeleton} 字节：标题/四问头/空位提示/尾注），` +

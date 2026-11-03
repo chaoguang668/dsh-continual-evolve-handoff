@@ -43,12 +43,11 @@ describe("handoff view: structure", () => {
 });
 
 describe("handoff view: routing", () => {
-	it("routes user memories to ① and feedback/reference to ②", () => {
+	it("routes user memories to ① and feedback to ②", () => {
 		const text = formatHandoff(
 			[
 				record("stack", "user", "TypeScript monorepo"),
 				record("lint", "feedback", "**Why:** slow\n**How to apply:** use oxlint"),
-				record("src", "reference", "source at C:\\work"),
 			],
 			"WS",
 		);
@@ -56,12 +55,39 @@ describe("handoff view: routing", () => {
 		const progress = text.slice(text.indexOf("## ②"), text.indexOf("## ③"));
 		expect(who).toContain("`stack`");
 		expect(progress).toContain("`lint`");
-		expect(progress).toContain("`src`");
 	});
 
-	it("falls back to ① for an unknown type rather than dropping the row", () => {
+	it("keeps reference rows out of the four questions and counts them instead", () => {
+		// A pointer is not a conclusion. Folding reference into ② once pushed the
+		// real feedback rows past the per-question limit (48 pointers vs 14
+		// conclusions in a real store), leaving the view non-actionable.
+		const text = formatHandoff(
+			[
+				record("lint", "feedback", "**Why:** slow\n**How to apply:** use oxlint"),
+				record("src", "reference", "source at C:\\work"),
+			],
+			"WS",
+		);
+		expect(text).not.toContain("`src`");
+		expect(text).not.toContain("C:\\work");
+		expect(text).toContain("另有 reference 1 条");
+	});
+
+	it("never lets reference rows displace feedback entries", () => {
+		const rows = [
+			record("real", "feedback", "**Why:** because\n**How to apply:** do the thing"),
+			...Array.from({ length: 30 }, (_, index) => record(`ptr${index}`, "reference", `pointer ${index}`)),
+		];
+		const text = formatHandoff(rows, "WS", { limit: 2 });
+		const progress = text.slice(text.indexOf("## ②"), text.indexOf("## ③"));
+		expect(progress).toContain("`real`");
+		expect(progress).not.toContain("`ptr0`");
+	});
+
+	it("counts an unknown type as unlisted rather than dropping it silently", () => {
 		const text = formatHandoff([record("odd", "something-new", "kept anyway")], "WS");
-		expect(text).toContain("`odd`");
+		expect(text).toContain("something-new 1 条");
+		expect(text).toContain("共 1 条记忆");
 	});
 });
 
